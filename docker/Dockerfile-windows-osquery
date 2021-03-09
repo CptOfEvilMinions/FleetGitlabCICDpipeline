@@ -1,0 +1,15 @@
+ARG WINDOWS_OSQUERY_DOCKER_IMAGE
+FROM ${WINDOWS_OSQUERY_DOCKER_IMAGE}
+
+ARG OSQUERY_VERSION="4.6.0"
+
+#### Install Osquery ####
+# Download Osquery
+RUN $ProgressPreference = 'SilentlyContinue'
+RUN Invoke-WebRequest -Uri https://pkg.osquery.io/windows/osquery-$env:OSQUERY_WIN_VERSION.msi -OutFile $env:temp\osquery-$env:OSQUERY_WIN_VERSION.msi -MaximumRedirection 3
+
+# Install Osquery
+RUN msiexec.exe /I $env:temp\osquery-$env:OSQUERY_WIN_VERSION.msi /quiet 
+
+# Ensure that osquery is installed
+RUN for ($i=0; $i -le 100; $i++) { if (!(Test-Path "C:\Program Files\osquery\osqueryi.exe")) { sleep 3} else { break }}docker/Dockerfile-windows-osquery

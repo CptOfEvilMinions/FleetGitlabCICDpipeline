@@ -1,0 +1,15 @@
+ARG LINUX_OSQUERY_DOCKER_IMAGE
+FROM ${LINUX_OSQUERY_DOCKER_IMAGE}
+
+ARG OSQUERY_VERSION="4.6.0"
+
+#### Install Osquery ####
+# Add Osquery repo
+RUN apt update -y && apt install gnupg2 software-properties-common -y &&\
+    export OSQUERY_KEY=1484120AC4E9F8A1A577AEEE97A80C63C9D8B80B &&\
+    apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys $OSQUERY_KEY &&\
+    add-apt-repository 'deb [arch=amd64] https://pkg.osquery.io/deb deb main' 
+
+# Install Osquery
+RUN apt-get update -y && apt-get install --quiet osquery=${OSQUERY_VERSION}-1.linux jsonlint jq -y
+=

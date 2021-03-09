@@ -1,0 +1,13 @@
+FROM alpine:latest
+
+ARG FLEET_VERSION="3.8.0"
+
+# Install software and vault
+RUN apk add -q curl jq vault
+RUN chown vault $(which vault)
+
+# Install FleetCTL
+RUN curl -s -L https://github.com/fleetdm/fleet/releases/download/${FLEET_VERSION}/fleetctl-linux.tar.gz --output /tmp/fleetctl-linux.tar.gz && \
+    cd /tmp && \
+    tar -xvzf fleetctl-linux.tar.gz && \
+    mv fleetctl-linux/fleetctl /usr/local/bin/fleetctl

@@ -1,0 +1,6 @@
+gitlab-license
+conf/tls/tls.key
+conf/tls/tls.crt
+conf/vault/roles/gitlab-jwt-role.json
+conf/vault/policies/fleet-gitlab-read-only-policy.hcl
+.DS_Store

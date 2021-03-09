@@ -1,0 +1,198 @@
+variables:
+  OSQUERY_VERSION: 4.6.0
+  OSQUERY_WIN_VERSION: 4.6.0.2
+  DOCKER_REGISTRY_ADDR: 'registry.hackinglab.local'
+  FLEET_URL: 'https://fleet.hackinglab.local:8443'
+  FLEET_VERSION: '3.8.0'
+  VAULT_ADDR: 'https://vault.hackinglab.local'
+  VAULT_ROLE: 'gitlab-vault-readonly'
+  VAULT_SKIP_VERIFY: 'true'
+  LINUX_OSQUERY_DOCKER_IMAGE: 'ubuntu:20.04'
+  WINDOWS_OSQUERY_DOCKER_IMAGE: 'mcr.microsoft.com/windows/servercore:1909'
+  
+stages:
+  - build
+  - test
+  - deploy
+
+build_alpine_fleetctl:
+  stage: build 
+  image: docker:git
+  services:
+    - docker:20.10.3-dind
+  script:
+    # fetches the latest image (not failing if image is not found)
+    - docker pull ${DOCKER_REGISTRY_ADDR}/alpine-fleetctl:${FLEET_VERSION} || true
+    # Build Docker image
+    - >
+      docker build
+      -f docker/Dockerfile-alpine-fleetctl
+      --pull
+      --build-arg FLEET_VERSION=${FLEET_VERSION}
+      --cache-from alpine-fleetctl:${FLEET_VERSION}
+      --tag ${DOCKER_REGISTRY_ADDR}/alpine-fleetctl:${FLEET_VERSION}
+      .
+    # Tag Docker image for Docker Registry
+    - docker push ${DOCKER_REGISTRY_ADDR}/alpine-fleetctl:${FLEET_VERSION}
+  tags:
+    - docker
+    - linux
+
+build_osquery_linux:
+  stage: build 
+  image: docker:git
+  services:
+    - docker:20.10.3-dind
+  script:
+    # Install Docker via APK
+    # fetches the latest image (not failing if image is not found)
+    - docker pull ${DOCKER_REGISTRY_ADDR}/linux-osquery:${OSQUERY_VERSION} || true
+    # Build Docker image
+    - >
+      docker build
+      -f docker/Dockerfile-linux-osquery
+      --pull
+      --build-arg LINUX_OSQUERY_DOCKER_IMAGE=${LINUX_OSQUERY_DOCKER_IMAGE}
+      --build-arg OSQUERY_VERSION=${OSQUERY_VERSION}
+      --cache-from linux-osquery:${OSQUERY_VERSION}
+      --tag ${DOCKER_REGISTRY_ADDR}/linux-osquery:${OSQUERY_VERSION}
+      .
+    # Tag Docker image for Docker Registry
+    - docker push ${DOCKER_REGISTRY_ADDR}/linux-osquery:${OSQUERY_VERSION}
+  tags:
+    - docker
+    - linux
+
+# build_docker_windows:
+#   stage: build
+#   variables:
+#     IMAGE_TAG: windows-1903-osquery-${OSQUERY_VERSION}
+#   tags:
+#     - docker
+#   image: mcr.microsoft.com/windows:1903
+#   script:
+#     # Download Osquery
+#     - Invoke-WebRequest -Uri "https://pkg.osquery.io/windows/osquery-${OSQUERY_VERSION}.msi" -OutFile %appdata%\Local\Temp\osquery-${OSQUERY_VERSION}.msi -MaximumRedirection 3
+#     # Install Osquery
+#     - Start-Process $ENV:TEMP\osquery-${OSQUERY_VERSION}.msi -ArgumentList '/quiet' -Wait
+  
+test_linux_osquery_config:
+  image: ${DOCKER_REGISTRY_ADDR}/linux-osquery:${OSQUERY_VERSION}
+  stage: test
+  variables:
+    OSQUERY_CONFIG_FILE_PATH: 'osquery-linux.conf'
+  script:
+    # Test Osquery version
+    - export OSQUERY_APT_VERSION=$(osqueryi -version | awk '{print $3}')
+    - echo $OSQUERY_APT_VERSION
+    - echo $OSQUERY_VERSION
+    - '[[ ${OSQUERY_APT_VERSION} == ${OSQUERY_VERSION} ]] && echo "Equal" || exit 1'
+    # Test Osquery config JSON lint check
+    - jsonlint-php ${OSQUERY_CONFIG_FILE_PATH}
+    # Test Osquery config check
+    - osqueryi --config_path ${OSQUERY_CONFIG_FILE_PATH} --config_check
+    # Test each query
+    - |
+      jq -r '.schedule | keys[] as $k | "\($k)\t\(.[$k] | .query)"' ${OSQUERY_CONFIG_FILE_PATH} | while read query; do
+        # Print Osquery query key name - echo "$query" | awk -F $'\t' '{print $1}'
+        # Print Osquery query - echo "$query" | awk -F $'\t' '{print $2}'
+        osq_query_name=$(echo "$query" | awk -F $'\t' '{print $1}')
+        osq_query=$(echo "$query" | awk -F $'\t' '{print $2}')
+        osqueryi --json "${osq_query}" 1>/dev/null && echo "[+] - Passed query test - ${osq_query_name}" || { echo "[-] - Failed query test:${osq_query_name}"; exit 1;};
+      done
+  tags:
+    - linux
+    - docker
+
+test_windows_osquery_config:
+  image: mcr.microsoft.com/windows/servercore:1909
+  stage: test
+  variables:
+    OSQUERY_CONFIG_FILE_PATH: 'osquery-windows.conf'
+  script:
+    # Install Osquery
+    - |
+      $ProgressPreference = 'SilentlyContinue'
+      Invoke-WebRequest -Uri https://pkg.osquery.io/windows/osquery-$env:OSQUERY_WIN_VERSION.msi -OutFile $env:temp\osquery-$env:OSQUERY_WIN_VERSION.msi -MaximumRedirection 3
+      msiexec.exe /I $env:temp\osquery-$env:OSQUERY_WIN_VERSION.msi /quiet 
+      for ($i=0; $i -le 100; $i++) { if (!(Test-Path "C:\Program Files\osquery\osqueryi.exe")) { sleep 3} else { break }}
+    # Test Osquery version
+    - |
+      $env:osquery_win_version = & 'C:\Program Files\osquery\osqueryi.exe' -version |  %{($_ -split "\s+")[2]}
+      echo $env:osquery_win_version
+      echo $env:OSQUERY_WIN_VERSION
+      if ($env:osquery_win_version -eq $env:OSQUERY_WIN_VERSION) { Write-Host "Equal" } else { exit 1 }
+    # Test Osquery config JSON lint check
+    - |
+      try {
+        Get-Content $env:OSQUERY_CONFIG_FILE_PATH | ConvertFrom-Json -ErrorAction Stop;
+      } catch {
+        exit 1
+      }
+    # Test Osquery config check
+    - Start-Process -NoNewWindow -FilePath "C:\\Program Files\\osquery\\osqueryi.exe" -ArgumentList "--config_path osquery-windows.conf", "--config_check"
+    # Test each query
+    - |
+      $osquery_json_data = Get-Content .\$env:OSQUERY_CONFIG_FILE_PATH | ConvertFrom-Json
+      foreach ($query in $osquery_json_data.schedule.PSObject.Properties ) {
+        $osq_query_name=$query.name
+        $osq_query=$query.Value.query
+        & 'C:\Program Files\osquery\osqueryi.exe' --json $osq_query | Out-Null
+        if ($?) {
+          echo "[+] - Passed query test - $osq_query_name"
+        } else {
+          echo "[-] - Failed query test: $osq_query_name"
+          exit 1
+        }
+      }
+  tags:
+    - windows
+    - docker
+
+# test_macos_osquery_config:
+#   stage: test
+#   script:
+#     - cd /tmp && curl https://pkg.osquery.io/darwin/osquery-${OSQUERY_VERSION}.pkg --output osquery-${OSQUERY_VERSION}.pkg
+#     - installer -pkg /tmp/osquery-${OSQUERY_VERSION}.pkg -target /
+#     # Test Osquery config check
+#     - osqueryi --config_path osquery-linux.conf --config_check
+#     - brew install jq
+#     - : > 
+#       jq -rc '.queries | values | .[].query' osquery-linux.conf  | while read query; do
+#         (osqueryi --json "${query}" > /dev/null && echo "[+] - Passed query test - ${query}") || (echo "[-] - Failed query test - ${query}" && exit 1)
+#       done
+#   tags:
+#     - macos
+
+deploy_to_fleet:
+  image: ${DOCKER_REGISTRY_ADDR}/alpine-fleetctl:${FLEET_VERSION}
+  stage: deploy
+  only:
+    - master
+  script:
+    # Get secrets
+    - export VAULT_TOKEN=$(curl -k -s -X POST "${VAULT_ADDR}/v1/auth/jwt/login" --data "{\"jwt\":\"$CI_JOB_JWT\",\"role\":\"${VAULT_ROLE}\"}" | jq -r .auth.client_token)
+    - echo ${VAULT_TOKEN}
+    # Now use the VAULT_TOKEN to read the secret and store it in an environment variable
+    - "export VAULT_SECRETS=$( curl -k -s -H \"X-Vault-Token: ${VAULT_TOKEN}\" -X GET ${VAULT_ADDR}/v1/secrets/data/fleet)"
+    - export FLEET_USERNAME=$( echo ${VAULT_SECRETS} | jq -r .data.data.username)
+    - export FLEET_PASSWORD=$( echo ${VAULT_SECRETS} | jq -r .data.data.password)
+    # Login into Fleet
+    - fleetctl config set --address ${FLEET_URL} --tls-skip-verify
+    - fleetctl login --email ${FLEET_USERNAME} --password ${FLEET_PASSWORD}
+    # Convert Osquery configs from JSON to YAML for FleetDM
+    - |
+      for osq_json_config in $(ls osquery-*.conf); 
+      do 
+        echo ${osq_json_config}; 
+        fleetctl convert -f ${osq_json_config} > $(basename ${osq_json_config} .conf).yaml
+      done
+    # Upload query pack to FleetDM
+    - |
+      for osq_yaml_config in $(ls osquery-*.yaml); 
+      do 
+        echo ${osq_yaml_config}; 
+        fleetctl apply -f ${osq_yaml_config}
+      done
+  # Force human to push "deploy" for new code
+  when: manual
